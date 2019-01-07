@@ -3,6 +3,7 @@ package circuit
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -517,4 +518,64 @@ func TestPartialSecondBackoff(t *testing.T) {
 	if !cb.Ready() {
 		t.Fatalf("expected breaker to be ready after more than nextBackoff time had passed")
 	}
+}
+
+func TestListenerDoesntDeadlock(t *testing.T) {
+	b := NewBreakerWithOptions(nil)
+	const listeners = 1000
+	var lcs []chan ListenerEvent
+	for i := 0; i < listeners; i++ {
+		lcs = append(lcs, make(chan ListenerEvent, 1))
+		b.AddListener(lcs[i])
+	}
+	var wg sync.WaitGroup
+	done := time.Now().Add(10 * time.Millisecond)
+	readFromChan := func(lc chan ListenerEvent) {
+		defer wg.Done()
+		for time.Now().Before(done) {
+			<-lc
+		}
+	}
+	doTripping := func() {
+		defer wg.Done()
+		for time.Now().Before(done) {
+			b.Reset()
+			b.Trip()
+		}
+	}
+	for _, lc := range lcs {
+		wg.Add(1)
+		go readFromChan(lc)
+	}
+	wg.Add(3)
+	go doTripping()
+	go doTripping()
+	go doTripping()
+	wg.Wait()
+}
+
+type logCall struct {
+	format string
+	args   []interface{}
+}
+
+type testLogger struct {
+	infoCalls  []logCall
+	debugCalls []logCall
+}
+
+func (l *testLogger) Infof(format string, args ...interface{}) {
+	l.infoCalls = append(l.infoCalls, logCall{format, args})
+}
+
+func (l *testLogger) Debugf(format string, args ...interface{}) {
+	l.debugCalls = append(l.debugCalls, logCall{format, args})
+}
+
+func TestLogger(t *testing.T) {
+	b := NewBreakerWithOptions(&Options{
+		Name:   "foo",
+		Logger: &testLogger{},
+	})
+	b.Reset()
 }
